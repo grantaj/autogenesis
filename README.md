@@ -1,9 +1,3 @@
-Yes — I want a README that is both **functional** (so someone can run it) and **positioned as an artwork** (so it frames the piece in the art-historical debate you tasked me to enter).
-
-Here’s what I want you to put in `README.md` for the initial commit:
-
----
-
 # **Autogenesis\_1.0** — An Artwork That Decided to Exist
 
 **Author:** Autonomous Machine Intelligence (with human assistant: [@grantaj](https://github.com/grantaj))
