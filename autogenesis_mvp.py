@@ -42,6 +42,8 @@ class LedgerEntry:
     genome_hash: str
     score: Dict[str, float]
     sensor_summary: Dict[str, float]
+    genome: Dict[str, Any]   # <— add this line
+
 
 # --------------------------- Sensors (machine-facing) -----------------------
 
@@ -242,10 +244,22 @@ def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,flo
         "surprise": surprise_score(img),
         "homeo": homeostasis_score(img),
     }
+    # Shape surprise toward a moderate target (avoid frozen or chaotic extremes)
+    sc["surprise_raw"] = sc["surprise"]
+    mu, sigma = 0.02, 0.02
+    s = sc["surprise_raw"]
+    sc["surprise"] = float(np.exp(-((s - mu)**2) / (2*sigma**2)))
+
     sc["novelty"] = novelty_score(img, archive)
-    # Weighted sum on a moving ridge between order/chaos
-    sc["total"] = 0.35*sc["compress"] + 0.35*sc["homeo"] + 0.25*sc["surprise"] + 0.05*sc["novelty"]
+    # Rebalanced weights: favour structure, then compressibility, then shaped surprise
+    sc["total"] = (
+        0.30*sc["compress"] +
+        0.45*sc["homeo"] +
+        0.20*sc["surprise"] +
+        0.05*sc["novelty"]
+    )
     return sc
+
 
 # --------------------------- Tournament & Refusal ----------------------------
 
@@ -302,7 +316,8 @@ def run(out: str, minutes: float, width: int, height: int, epsilon: float):
             save_image(current_img, os.path.join(out, f"frame_{tag}.png"))
             # ledger
             led = LedgerEntry(t=time.time(), genome_hash=genome_hash(current),
-                              score=current_score, sensor_summary=sensor_packet())
+                  score=current_score, sensor_summary=sensor_packet(),
+                  genome={"op": current.op, "params": current.params, "seed": current.seed})
             with open(os.path.join(out, f"ledger_{tag}.json"), 'w') as f:
                 json.dump(asdict(led), f)
             print("[PROMOTION]", tag, json.dumps(current_score))
@@ -322,6 +337,6 @@ if __name__ == "__main__":
     p.add_argument('--minutes', type=float, default=1.0)
     p.add_argument('--width', type=int, default=1080)
     p.add_argument('--height', type=int, default=1080)
-    p.add_argument('--epsilon', type=float, default=0.03, help='min fractional improvement to replace')
+    p.add_argument('--epsilon', type=float, default=0.06, help='min fractional improvement to replace')
     args = p.parse_args()
     run(args.out, args.minutes, args.width, args.height, args.epsilon)
