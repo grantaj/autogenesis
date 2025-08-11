@@ -23,6 +23,9 @@ from dataclasses import dataclass, asdict
 from typing import Tuple, Dict, Any
 import numpy as np
 from PIL import Image
+from scipy.ndimage import gaussian_filter
+
+
 try:
     import torch
     TORCH = True
@@ -239,26 +242,37 @@ def novelty_score(img: np.ndarray, archive: Dict[str, float]) -> float:
 
 
 def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float]) -> Dict[str, float]:
+    # raw terms
     sc = {
-        "compress": compressibility_score(img),
-        "surprise": surprise_score(img),
-        "homeo": homeostasis_score(img),
+        "compress": compressibility_score(img),   # wide range (≈40..200+)
+        "surprise_raw": surprise_score(img),      # ≈0..0.2
+        "homeo": homeostasis_score(img),          # ≈0.1..3.5
     }
-    # Shape surprise toward a moderate target (avoid frozen or chaotic extremes)
-    sc["surprise_raw"] = sc["surprise"]
-    mu, sigma = 0.02, 0.02
-    s = sc["surprise_raw"]
-    sc["surprise"] = float(np.exp(-((s - mu)**2) / (2*sigma**2)))
-
     sc["novelty"] = novelty_score(img, archive)
-    # Rebalanced weights: favour structure, then compressibility, then shaped surprise
+
+    # shape surprise toward moderate change (avoid frozen or chaotic extremes)
+    mu, sigma = 0.02, 0.02
+    sr = sc["surprise_raw"]
+    surprise_s = float(np.exp(-((sr - mu)**2) / (2*sigma**2)))
+
+    # squash/normalize to ~[0,1] so weights are meaningful
+    compress_s = float(np.tanh(sc["compress"] / 100.0))      # 100→~0.76, 200→~0.96
+    homeo_s    = float(np.clip(sc["homeo"] / 2.5, 0.0, 1.0)) # ≥2.5 is “excellent” and saturates
+
+    # keep raw terms for the ledger
+    sc["compress_s"] = compress_s
+    sc["homeo_s"] = homeo_s
+    sc["surprise"] = surprise_s
+
     sc["total"] = (
-        0.30*sc["compress"] +
-        0.45*sc["homeo"] +
-        0.20*sc["surprise"] +
-        0.05*sc["novelty"]
+        0.35*homeo_s +
+        0.30*compress_s +
+        0.25*surprise_s +
+        0.10*sc["novelty"]
     )
     return sc
+
+
 
 
 # --------------------------- Tournament & Refusal ----------------------------
@@ -282,6 +296,13 @@ def tournament(h, w, base_rng: random.Random, k=6) -> Tuple[Genome, np.ndarray, 
             best, best_img, best_score = g, img, sc
     return best, best_img, best_score
 
+def durability_score(img: np.ndarray, archive: Dict[str, float]) -> float:
+    # 0.5px Gaussian blur = minimal perceptual perturbation
+    imgf = gaussian_filter(img.astype(np.float32), sigma=(0.5, 0.5, 0))
+    imgf = np.clip(imgf, 0, 255).astype(np.uint8)
+    return joint_score(imgf, sensor_packet(), archive)["total"]
+
+
 # --------------------------- Main Loop --------------------------------------
 
 def save_image(img: np.ndarray, path: str):
@@ -302,28 +323,35 @@ def run(out: str, minutes: float, width: int, height: int, epsilon: float):
     n = 0
     while time.time() - start < minutes*60:
         cand, cand_img, cand_score = tournament(height, width, rng)
-        # refusal: only replace if improvement exceeds epsilon
+
         if cand_score["total"] > current_score["total"] * (1 + epsilon):
-            # update history
+            # Durability gate: candidate must still beat current after a tiny perturbation
+            dur = durability_score(cand_img, archive)
+            if dur <= current_score["total"] * (1 + epsilon):
+                time.sleep(0.2)
+                continue
+
+            # ... proceed to promote
             _prev_prev_img, _prev_img = _prev_img, cand_img
-            # archive novelty token
             if imagehash is not None:
                 key = str(imagehash.phash(Image.fromarray(cand_img)))
                 archive[key] = cand_score["total"]
-            # swap
             current, current_img, current_score = cand, cand_img, cand_score
             tag = f"{int(time.time())}_{genome_hash(current)}"
             save_image(current_img, os.path.join(out, f"frame_{tag}.png"))
-            # ledger
-            led = LedgerEntry(t=time.time(), genome_hash=genome_hash(current),
-                  score=current_score, sensor_summary=sensor_packet(),
-                  genome={"op": current.op, "params": current.params, "seed": current.seed})
+            led = LedgerEntry(
+                t=time.time(),
+                genome_hash=genome_hash(current),
+                genome={"op": current.op, "params": current.params, "seed": current.seed},
+                score=current_score,
+                sensor_summary=sensor_packet()
+            )
             with open(os.path.join(out, f"ledger_{tag}.json"), 'w') as f:
                 json.dump(asdict(led), f)
             print("[PROMOTION]", tag, json.dumps(current_score))
         else:
-            # mild idle sleep to avoid busy spin; keep time passing
             time.sleep(0.2)
+
         n += 1
     # Save final image if not already saved recently
     tag = f"final_{int(time.time())}_{genome_hash(current)}"
