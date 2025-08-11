@@ -1,0 +1,9 @@
+numpy
+pillow
+imagehash
+scipy
+tqdm
+# Optional GPU acceleration
+torch
+torchvision
+torchaudio

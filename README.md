@@ -37,16 +37,38 @@ It will happily ignore you if it deems change unnecessary.
 * Packages: `numpy`, `pillow`, `imagehash`, `tqdm`
 * Optional GPU acceleration: `torch` (CUDA build for your GPU)
 
-### Installation
+
+## Installation
+
+Clone the repository and create a virtual environment:
 
 ```bash
 git clone https://github.com/grantaj/autogenesis.git
 cd autogenesis
 python -m venv .venv
 source .venv/bin/activate    # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-pip install numpy pillow imagehash tqdm
-# Optional: pip install torch
 ```
+
+Install all dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Optional GPU Acceleration
+
+If you have an **NVIDIA GPU** with CUDA, install the matching PyTorch CUDA build:
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+If you are on **Apple Silicon (M1/M2)**, install the Metal-accelerated build:
+
+```bash
+pip install torch torchvision torchaudio
+```
+
 
 ### Run
 
