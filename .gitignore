@@ -1,3 +1,9 @@
 .venv/
 out*/
 *.zip
+
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
