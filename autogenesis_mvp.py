@@ -78,6 +78,98 @@ def perlin_like_noise(h, w, scale, rng):
     field = (field - field.min())/(np.ptp(field)+1e-8)
     return field.astype(np.float32), g.astype(np.float32)
 
+# --------------------------- Renderers --------------------------------------
+
+def render_flow(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    noise, _grad = perlin_like_noise(h, w, float(params.get("scale", 0.006)), rng)
+
+    pos = np.dstack(np.meshgrid(
+        np.linspace(0, 1, w, endpoint=False),
+        np.linspace(0, 1, h, endpoint=False)
+    )).astype(np.float32)
+
+    img = np.zeros((h, w, 3), dtype=np.float32)
+    steps = int(params.get("steps", 600))
+    jitter = float(params.get("jitter", 0.5))
+
+    for i in range(steps):
+        vx = np.cos(noise * 2 * np.pi)
+        vy = np.sin(noise * 2 * np.pi)
+        pos[..., 0] = (pos[..., 0] + jitter * vx / w) % 1.0
+        pos[..., 1] = (pos[..., 1] + jitter * vy / h) % 1.0
+
+        phase = (i / max(1, steps)) * 2 * np.pi
+        c = np.dstack([
+            0.5 + 0.5 * np.sin(phase + 6.0 * pos[..., 0]),
+            0.5 + 0.5 * np.sin(phase + 5.0 * pos[..., 1]),
+            0.5 + 0.5 * np.sin(phase + 7.0 * (pos[..., 0] + pos[..., 1]))
+        ])
+        img = 0.99 * img + 0.01 * c
+
+    img = np.clip(img, 0, 1)
+    return (img * 255).astype(np.uint8)
+
+
+def render_rd(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    U = np.ones((h, w), dtype=np.float32)
+    V = np.zeros((h, w), dtype=np.float32)
+
+    # random seeding
+    idx_y = rng.integers(0, h, size=50)
+    idx_x = rng.integers(0, w, size=50)
+    V[idx_y, idx_x] = 1.0
+
+    def lap(X: np.ndarray) -> np.ndarray:
+        return (-4 * X + np.roll(X, 1, 0) + np.roll(X, -1, 0)
+                + np.roll(X, 1, 1) + np.roll(X, -1, 1))
+
+    f = float(params.get("f", 0.03))
+    k = float(params.get("k", 0.055))
+    dt = float(params.get("dt", 1.0))
+    Du = float(params.get("diff_u", 0.16))
+    Dv = float(params.get("diff_v", 0.08))
+    iters = int(params.get("iters", 500))
+
+    for _ in range(iters):
+        UVV = U * V * V
+        U += (Du * lap(U) - UVV + f * (1 - U)) * dt
+        V += (Dv * lap(V) + UVV - (f + k) * V) * dt
+        U = np.clip(U, 0, 1)
+        V = np.clip(V, 0, 1)
+
+    img = np.stack([U, V, 1 - U], axis=-1)
+    img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    return (img * 255).astype(np.uint8)
+
+
+def render_spectral(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    bands = int(params.get("bands", 5))
+    alpha = float(params.get("alpha", 0.8))
+    _iters = int(params.get("iters", 3))
+
+    img = np.zeros((h, w), dtype=np.float32)
+    Y, X = np.mgrid[0:h, 0:w]
+
+    for _ in range(bands):
+        fx = int(rng.integers(1, max(2, min(64, w // 4))))
+        fy = int(rng.integers(1, max(2, min(64, h // 4))))
+        phase = float(rng.random() * 2 * np.pi)
+        img += np.sin(2 * np.pi * (X * fx / w + Y * fy / h) + phase)
+
+    img = img / max(1, bands)
+    img = np.sign(img) * np.power(np.abs(img), alpha).astype(np.float32)
+
+    rgb = np.stack([
+        0.5 + 0.5 * np.sin(2.1 * img),
+        0.5 + 0.5 * np.sin(1.7 * img + 1.3),
+        0.5 + 0.5 * np.sin(1.3 * img + 2.1)
+    ], axis=-1)
+    rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min() + 1e-8)
+    return (rgb * 255).astype(np.uint8)
+
 # Assume render_flow, render_rd, render_spectral defined as before
 def render(genome: Genome, h: int, w: int) -> np.ndarray:
     if genome.op == "flow":
@@ -181,6 +273,7 @@ def durability_score(img: np.ndarray) -> float:
     return joint_score(img_blur, sensor_packet(), archive)["total"]
 
 def time_window_durability(cand_img: np.ndarray, window_s=30, step_s=5) -> bool:
+
     start_score = joint_score(cand_img, sensor_packet(), archive)["total"]
     for _ in range(window_s // step_s):
         time.sleep(step_s)
