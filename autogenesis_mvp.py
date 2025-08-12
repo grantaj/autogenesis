@@ -351,7 +351,8 @@ def run(out: str, minutes: float, width: int, height: int, cfg: Config):
                 genome_hash=genome_hash(current),
                 genome={"op": current.op, "params": current.params, "seed": current.seed},
                 score=current_score,
-                sensor_summary=sensor_packet()
+                sensor_summary=sensor_packet(),
+                config=asdict(cfg)
             )
             with open(os.path.join(out, f"ledger_{tag}.json"), 'w') as f:
                 json.dump(asdict(led), f)
