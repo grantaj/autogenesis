@@ -1,8 +1,13 @@
 """
-Autogenesis_1.0 — MVP autonomous visual generator (revised for long runs)
+Autogenesis_1.0 — v2 autonomous visual generator
 -----------------------------------------------------------
-Adds scoring squash/normalisation, durability check using SciPy Gaussian blur,
-novelty archive persistence, and optional time-window durability.
+Pivot to coherence+distance gating:
+- Structural signature (radial power spectrum, edge histogram/density, component stats)
+- Coherence metric (mid-band balance + edge-density bell curve)
+- Promotions require BOTH coherence gain and structural distance
+- Time-window durability retained
+- Novelty archive persistence retained
+- Records config and structural signature in ledger
 """
 
 from __future__ import annotations
@@ -11,7 +16,8 @@ from dataclasses import dataclass, asdict
 from typing import Tuple, Dict, Any
 import numpy as np
 from PIL import Image
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, sobel, label
+
 try:
     import torch
     TORCH = True
@@ -23,6 +29,8 @@ except Exception:
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
+# --- Ledger ---
+
 @dataclass
 class LedgerEntry:
     t: float
@@ -30,10 +38,14 @@ class LedgerEntry:
     genome: Dict[str, Any]
     score: Dict[str, float]
     sensor_summary: Dict[str, float]
+    config: Dict[str, Any]
+    struct: Dict[str, Any]
 
 # --- Tunable configuration (CLI-exposed) ---
+
 @dataclass
 class Config:
+    # legacy knobs (still used for drift/epsilon/durability)
     w_homeo: float
     w_compress: float
     w_surprise: float
@@ -45,6 +57,17 @@ class Config:
     epsilon: float
     drift_tau_min: float  # 0 disables drift
     min_epsilon: float
+    # v2 coherence/distance params
+    rps_bins: int
+    edge_bins: int
+    delta_struct: float          # min structural distance to consider “new”
+    coh_w_rps: float             # coherence weights
+    coh_w_edges: float
+    coh_edge_density_mu: float   # target edge density (bell curve)
+    coh_edge_density_sigma: float
+    coh_improve: float           # fractional improvement in coherence
+
+# --- Sensors & genome ---
 
 def sensor_packet() -> Dict[str, float]:
     t = time.time()
@@ -125,7 +148,6 @@ def render_flow(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarr
     img = np.clip(img, 0, 1)
     return (img * 255).astype(np.uint8)
 
-
 def render_rd(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     U = np.ones((h, w), dtype=np.float32)
@@ -158,7 +180,6 @@ def render_rd(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray
     img = (img - img.min()) / (img.max() - img.min() + 1e-8)
     return (img * 255).astype(np.uint8)
 
-
 def render_spectral(h: int, w: int, params: Dict[str, float], seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     bands = int(params.get("bands", 5))
@@ -185,7 +206,6 @@ def render_spectral(h: int, w: int, params: Dict[str, float], seed: int) -> np.n
     rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min() + 1e-8)
     return (rgb * 255).astype(np.uint8)
 
-# Assume render_flow, render_rd, render_spectral defined as before
 def render(genome: Genome, h: int, w: int) -> np.ndarray:
     if genome.op == "flow":
         return render_flow(h,w,genome.params,genome.seed)
@@ -193,6 +213,8 @@ def render(genome: Genome, h: int, w: int) -> np.ndarray:
         return render_rd(h,w,genome.params,genome.seed)
     else:
         return render_spectral(h,w,genome.params,genome.seed)
+
+# --- Legacy novelty (kept; used only to populate archive) ---
 
 try:
     import imagehash
@@ -241,29 +263,87 @@ def novelty_score(img: np.ndarray, archive: Dict[str, float]) -> float:
         return 0.0
     return 1.0
 
-def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float], cfg: Config) -> Dict[str, float]:
-    sc = {
-        "compress": compressibility_score(img),
-        "surprise_raw": surprise_score(img),
-        "homeo": homeostasis_score(img),
+# --- v2 structural signature & coherence ---
+
+def _radial_power_spectrum(gray: np.ndarray, bins: int = 32) -> np.ndarray:
+    F = np.fft.fftshift(np.fft.fft2(gray))
+    mag = np.abs(F)
+    h, w = mag.shape
+    Y, X = np.mgrid[-h//2:h//2, -w//2:w//2]
+    R = np.sqrt(X**2 + Y**2)
+    Rn = (R / (0.5 * min(h, w))).ravel()
+    M = mag.ravel()
+    edges = np.linspace(0, 1.0, bins + 1)
+    hist = np.zeros(bins, dtype=np.float32)
+    for i in range(bins):
+        m = (Rn >= edges[i]) & (Rn < edges[i+1])
+        if np.any(m):
+            hist[i] = np.mean(M[m])
+    s = hist / (np.sum(hist) + 1e-8)
+    return s.astype(np.float32)
+
+def _edge_histogram(gray: np.ndarray, bins: int = 32) -> tuple[np.ndarray, float]:
+    gx = sobel(gray, axis=1)
+    gy = sobel(gray, axis=0)
+    mag = np.hypot(gx, gy)
+    hist, _ = np.histogram(mag, bins=bins, range=(0, mag.max() + 1e-8), density=True)
+    hist = hist.astype(np.float32)
+    thresh = np.percentile(mag, 85.0)
+    density = float((mag > thresh).mean())
+    return (hist / (hist.sum() + 1e-8)).astype(np.float32), density
+
+def _component_stats(gray: np.ndarray) -> tuple[float, float]:
+    gx = sobel(gray, axis=1)
+    gy = sobel(gray, axis=0)
+    mag = np.hypot(gx, gy)
+    t = np.percentile(mag, 92.0)
+    bw = (mag > t).astype(np.uint8)
+    lbl, n = label(bw)
+    if n == 0:
+        return 0.0, 0.0
+    sizes = np.bincount(lbl.ravel())[1:].astype(np.float32)
+    return float(n), float(np.mean(sizes))
+
+def struct_signature(img: np.ndarray, rps_bins: int, edge_bins: int) -> Dict[str, Any]:
+    gray = np.mean(img.astype(np.float32), axis=-1)
+    gray = (gray - gray.min()) / (gray.ptp() + 1e-8)
+    rps = _radial_power_spectrum(gray, bins=rps_bins)
+    eh, edens = _edge_histogram(gray, bins=edge_bins)
+    ncc, mean_cc = _component_stats(gray)
+    return {
+        "rps": rps,
+        "edge_hist": eh,
+        "edge_density": float(edens),
+        "n_components_log": float(np.log1p(ncc)),
+        "mean_component_log": float(np.log1p(mean_cc)),
     }
-    sc["novelty"] = novelty_score(img, archive)
 
-    # shaped surprise around target
-    surprise_s = float(np.exp(-((sc["surprise_raw"] - cfg.surprise_mu)**2) / (2*cfg.surprise_sigma**2)))
-    # squash/normalize
-    compress_s = float(np.tanh(sc["compress"] / 100.0))
-    homeo_s    = float(np.clip(sc["homeo"] / 2.5, 0.0, 1.0))
+def struct_distance(sigA: Dict[str, Any], sigB: Dict[str, Any]) -> float:
+    d_rps = float(np.mean(np.abs(sigA["rps"] - sigB["rps"])))
+    d_eh  = float(np.mean(np.abs(sigA["edge_hist"] - sigB["edge_hist"])))
+    d_ed  = abs(sigA["edge_density"] - sigB["edge_density"])
+    d_nc  = abs(sigA["n_components_log"] - sigB["n_components_log"])
+    d_mc  = abs(sigA["mean_component_log"] - sigB["mean_component_log"])
+    return 0.45*d_rps + 0.35*d_eh + 0.10*d_ed + 0.05*d_nc + 0.05*d_mc
 
-    sc.update({"compress_s": compress_s, "homeo_s": homeo_s, "surprise": surprise_s})
-    sc["total"] = (
-        cfg.w_homeo*homeo_s +
-        cfg.w_compress*compress_s +
-        cfg.w_surprise*surprise_s +
-        cfg.w_novelty*sc["novelty"]
-    )
-    return sc
+def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float], cfg: Config) -> Dict[str, float]:
+    """v2: coherence only (0..1) combining RPS mid-band balance and edge-density bell curve."""
+    gray = np.mean(img.astype(np.float32), axis=-1)
+    gray = (gray - gray.min()) / (gray.ptp() + 1e-8)
+    rps = _radial_power_spectrum(gray, bins=cfg.rps_bins)
+    b0 = int(0.10 * cfg.rps_bins); b1 = int(0.45 * cfg.rps_bins)
+    mid = float(np.mean(rps[b0:b1]))
+    low = float(np.mean(rps[:b0]) + 1e-8)
+    high = float(np.mean(rps[b1:]) + 1e-8)
+    rps_coh = mid / (mid + 0.5*(low + high) + 1e-8)
+    _, edens = _edge_histogram(gray, bins=cfg.edge_bins)
+    mu, sig = cfg.coh_edge_density_mu, cfg.coh_edge_density_sigma
+    edge_coh = float(np.exp(-((edens - mu)**2) / (2*sig*sig)))
+    coherence = float(cfg.coh_w_rps * rps_coh + cfg.coh_w_edges * edge_coh)
+    return {"coherence": coherence, "rps_coh": rps_coh, "edge_coh": edge_coh,
+            "edge_density": edens, "total": coherence}
 
+# --- Selection & durability ---
 
 def genome_hash(g: Genome) -> str:
     m = hashlib.sha256()
@@ -283,14 +363,8 @@ def tournament(h, w, base_rng: random.Random, k=6, cfg: Config=None) -> Tuple[Ge
             best, best_img, best_score = g, img, sc
     return best, best_img, best_score
 
-
 def save_image(img: np.ndarray, path: str):
     Image.fromarray(img).save(path)
-
-def durability_score(img: np.ndarray) -> float:
-    img_blur = gaussian_filter(img.astype(np.float32), sigma=(0.5,0.5,0))
-    img_blur = np.clip(img_blur,0,255).astype(np.uint8)
-    return joint_score(img_blur, sensor_packet(), archive, cfg)["total"]
 
 def time_window_durability(cand_img: np.ndarray, cfg: Config) -> bool:
     start_score = joint_score(cand_img, sensor_packet(), archive, cfg)["total"]
@@ -304,6 +378,7 @@ def time_window_durability(cand_img: np.ndarray, cfg: Config) -> bool:
             return False
     return True
 
+# --- Novelty archive persistence ---
 
 def save_archive(path="archive.pkl"):
     with open(path, "wb") as f:
@@ -317,6 +392,8 @@ def load_archive(path="archive.pkl"):
 
 archive: Dict[str, float] = {}
 
+# --- Main loop ---
+
 def run(out: str, minutes: float, width: int, height: int, cfg: Config):
     global _prev_img, _prev_prev_img
     ensure_dir(out)
@@ -324,41 +401,62 @@ def run(out: str, minutes: float, width: int, height: int, cfg: Config):
     start = time.time()
     last_promo_t = start
     rng = random.Random()
+
     current = make_genome(rng)
     current_img = render(current, height, width)
     current_score = joint_score(current_img, sensor_packet(), archive, cfg)
+    current_sig = struct_signature(current_img, cfg.rps_bins, cfg.edge_bins)
+
     _prev_prev_img = _prev_img = current_img
-    start = time.time()
+
     while time.time() - start < minutes*60:
         cand, cand_img, cand_score = tournament(height, width, rng, cfg=cfg)
+        cand_sig = struct_signature(cand_img, cfg.rps_bins, cfg.edge_bins)
+        dist = struct_distance(current_sig, cand_sig)
+
+        # Drifted acceptance threshold (coherence improvement)
         age_min = (time.time() - last_promo_t) / 60.0
         eps_eff = max(cfg.min_epsilon, cfg.epsilon * math.exp(-age_min / cfg.drift_tau_min)) if cfg.drift_tau_min > 0 else cfg.epsilon
 
-        if cand_score["total"] > current_score["total"] * (1 + eps_eff):
-            last_promo_t = time.time()
+        coh_ok = cand_score["total"] >= current_score["total"] * (1.0 + max(cfg.coh_improve, eps_eff))
+        dist_ok = dist >= cfg.delta_struct
+
+        if coh_ok and dist_ok:
+            # durability gate
             if not time_window_durability(cand_img, cfg):
                 time.sleep(0.2)
                 continue
+
+            last_promo_t = time.time()
             _prev_prev_img, _prev_img = _prev_img, cand_img
+
             if imagehash is not None:
                 key = str(imagehash.phash(Image.fromarray(cand_img)))
                 archive[key] = cand_score["total"]
+
             current, current_img, current_score = cand, cand_img, cand_score
+            current_sig = cand_sig
+
             tag = f"{int(time.time())}_{genome_hash(current)}"
             save_image(current_img, os.path.join(out, f"frame_{tag}.png"))
+
             led = LedgerEntry(
                 t=time.time(),
                 genome_hash=genome_hash(current),
                 genome={"op": current.op, "params": current.params, "seed": current.seed},
                 score=current_score,
                 sensor_summary=sensor_packet(),
-                config=asdict(cfg)
+                config=asdict(cfg),
+                struct={"distance_from_prev": float(dist),
+                        **{k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in current_sig.items()}}
             )
             with open(os.path.join(out, f"ledger_{tag}.json"), 'w') as f:
                 json.dump(asdict(led), f)
+
             print("[PROMOTION]", tag, json.dumps(current_score))
         else:
             time.sleep(0.2)
+
     save_archive()
     tag = f"final_{int(time.time())}_{genome_hash(current)}"
     save_image(current_img, os.path.join(out, f"frame_{tag}.png"))
@@ -370,19 +468,27 @@ if __name__ == "__main__":
     p.add_argument('--minutes', type=float, default=1.0)
     p.add_argument('--width', type=int, default=1080)
     p.add_argument('--height', type=int, default=1080)
-    # scoring weights & surprise shape
+    # legacy scoring/durability knobs (still used for drift/epsilon/durability)
     p.add_argument('--w_homeo', type=float, default=0.35)
     p.add_argument('--w_compress', type=float, default=0.30)
     p.add_argument('--w_surprise', type=float, default=0.25)
     p.add_argument('--w_novelty', type=float, default=0.10)
     p.add_argument('--surprise_mu', type=float, default=0.02)
     p.add_argument('--surprise_sigma', type=float, default=0.02)
-    # durability and promotion policy
     p.add_argument('--dur_window', type=int, default=12, help='durability window (seconds)')
     p.add_argument('--dur_step', type=int, default=4, help='durability recheck step (seconds)')
     p.add_argument('--epsilon', type=float, default=0.06, help='base fractional improvement to replace')
     p.add_argument('--drift_tau', type=float, default=45.0, help='minutes; 0 disables drift')
     p.add_argument('--min_epsilon', type=float, default=0.02)
+    # v2 coherence/distance params
+    p.add_argument('--delta_struct', type=float, default=0.15)
+    p.add_argument('--rps_bins', type=int, default=32)
+    p.add_argument('--edge_bins', type=int, default=32)
+    p.add_argument('--coh_w_rps', type=float, default=0.6)
+    p.add_argument('--coh_w_edges', type=float, default=0.4)
+    p.add_argument('--coh_edge_density_mu', type=float, default=0.08)
+    p.add_argument('--coh_edge_density_sigma', type=float, default=0.05)
+    p.add_argument('--coh_improve', type=float, default=0.02)
     args = p.parse_args()
 
     cfg = Config(
@@ -397,6 +503,13 @@ if __name__ == "__main__":
         epsilon=args.epsilon,
         drift_tau_min=args.drift_tau,
         min_epsilon=args.min_epsilon,
+        rps_bins=args.rps_bins,
+        edge_bins=args.edge_bins,
+        delta_struct=args.delta_struct,
+        coh_w_rps=args.coh_w_rps,
+        coh_w_edges=args.coh_w_edges,
+        coh_edge_density_mu=args.coh_edge_density_mu,
+        coh_edge_density_sigma=args.coh_edge_density_sigma,
+        coh_improve=args.coh_improve,
     )
     run(args.out, args.minutes, args.width, args.height, cfg)
-
