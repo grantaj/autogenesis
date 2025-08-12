@@ -306,7 +306,7 @@ def _component_stats(gray: np.ndarray) -> tuple[float, float]:
 
 def struct_signature(img: np.ndarray, rps_bins: int, edge_bins: int) -> Dict[str, Any]:
     gray = np.mean(img.astype(np.float32), axis=-1)
-    gray = (gray - gray.min()) / (gray.ptp() + 1e-8)
+    gray = (gray - gray.min()) / (np.ptp(gray) + 1e-8)
     rps = _radial_power_spectrum(gray, bins=rps_bins)
     eh, edens = _edge_histogram(gray, bins=edge_bins)
     ncc, mean_cc = _component_stats(gray)
@@ -329,7 +329,7 @@ def struct_distance(sigA: Dict[str, Any], sigB: Dict[str, Any]) -> float:
 def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float], cfg: Config) -> Dict[str, float]:
     """v2: coherence only (0..1) combining RPS mid-band balance and edge-density bell curve."""
     gray = np.mean(img.astype(np.float32), axis=-1)
-    gray = (gray - gray.min()) / (gray.ptp() + 1e-8)
+    gray = (gray - gray.min()) / (np.ptp(gray) + 1e-8)
     rps = _radial_power_spectrum(gray, bins=cfg.rps_bins)
     b0 = int(0.10 * cfg.rps_bins); b1 = int(0.45 * cfg.rps_bins)
     mid = float(np.mean(rps[b0:b1]))
