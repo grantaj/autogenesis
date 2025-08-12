@@ -31,6 +31,21 @@ class LedgerEntry:
     score: Dict[str, float]
     sensor_summary: Dict[str, float]
 
+# --- Tunable configuration (CLI-exposed) ---
+@dataclass
+class Config:
+    w_homeo: float
+    w_compress: float
+    w_surprise: float
+    w_novelty: float
+    surprise_mu: float
+    surprise_sigma: float
+    dur_window: int
+    dur_step: int
+    epsilon: float
+    drift_tau_min: float  # 0 disables drift
+    min_epsilon: float
+
 def sensor_packet() -> Dict[str, float]:
     t = time.time()
     clk = t - int(t)
@@ -226,32 +241,36 @@ def novelty_score(img: np.ndarray, archive: Dict[str, float]) -> float:
         return 0.0
     return 1.0
 
-def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float]) -> Dict[str, float]:
+def joint_score(img: np.ndarray, sensors: Dict[str,float], archive: Dict[str,float], cfg: Config) -> Dict[str, float]:
     sc = {
         "compress": compressibility_score(img),
         "surprise_raw": surprise_score(img),
         "homeo": homeostasis_score(img),
     }
     sc["novelty"] = novelty_score(img, archive)
-    mu, sigma = 0.02, 0.02
-    surprise_s = float(np.exp(-((sc["surprise_raw"] - mu)**2) / (2*sigma**2)))
+
+    # shaped surprise around target
+    surprise_s = float(np.exp(-((sc["surprise_raw"] - cfg.surprise_mu)**2) / (2*cfg.surprise_sigma**2)))
+    # squash/normalize
     compress_s = float(np.tanh(sc["compress"] / 100.0))
-    homeo_s = float(np.clip(sc["homeo"] / 2.5, 0.0, 1.0))
+    homeo_s    = float(np.clip(sc["homeo"] / 2.5, 0.0, 1.0))
+
     sc.update({"compress_s": compress_s, "homeo_s": homeo_s, "surprise": surprise_s})
     sc["total"] = (
-        0.35*homeo_s +
-        0.30*compress_s +
-        0.25*surprise_s +
-        0.10*sc["novelty"]
+        cfg.w_homeo*homeo_s +
+        cfg.w_compress*compress_s +
+        cfg.w_surprise*surprise_s +
+        cfg.w_novelty*sc["novelty"]
     )
     return sc
+
 
 def genome_hash(g: Genome) -> str:
     m = hashlib.sha256()
     m.update((g.op+json.dumps(g.params, sort_keys=True)+str(g.seed)).encode())
     return m.hexdigest()[:16]
 
-def tournament(h, w, base_rng: random.Random, k=6) -> Tuple[Genome, np.ndarray, Dict[str,float]]:
+def tournament(h, w, base_rng: random.Random, k=6, cfg: Config=None) -> Tuple[Genome, np.ndarray, Dict[str,float]]:
     best = None
     best_img = None
     best_score = None
@@ -259,10 +278,11 @@ def tournament(h, w, base_rng: random.Random, k=6) -> Tuple[Genome, np.ndarray, 
     for _ in range(k):
         g = make_genome(base_rng)
         img = render(g, h, w)
-        sc = joint_score(img, sensors, archive)
+        sc = joint_score(img, sensors, archive, cfg)
         if best is None or sc["total"] > best_score["total"]:
             best, best_img, best_score = g, img, sc
     return best, best_img, best_score
+
 
 def save_image(img: np.ndarray, path: str):
     Image.fromarray(img).save(path)
@@ -270,19 +290,20 @@ def save_image(img: np.ndarray, path: str):
 def durability_score(img: np.ndarray) -> float:
     img_blur = gaussian_filter(img.astype(np.float32), sigma=(0.5,0.5,0))
     img_blur = np.clip(img_blur,0,255).astype(np.uint8)
-    return joint_score(img_blur, sensor_packet(), archive)["total"]
+    return joint_score(img_blur, sensor_packet(), archive, cfg)["total"]
 
-def time_window_durability(cand_img: np.ndarray, window_s=30, step_s=5) -> bool:
-
-    start_score = joint_score(cand_img, sensor_packet(), archive)["total"]
-    for _ in range(window_s // step_s):
-        time.sleep(step_s)
-        perturbed = gaussian_filter(cand_img.astype(np.float32), sigma=(0.5,0.5,0))
-        perturbed = np.clip(perturbed, 0, 255).astype(np.uint8)
-        score = joint_score(perturbed, sensor_packet(), archive)["total"]
-        if score <= start_score * 0.98:
+def time_window_durability(cand_img: np.ndarray, cfg: Config) -> bool:
+    start_score = joint_score(cand_img, sensor_packet(), archive, cfg)["total"]
+    steps = max(1, int(cfg.dur_window // max(1, cfg.dur_step)))
+    for _ in range(steps):
+        time.sleep(cfg.dur_step)
+        pert = gaussian_filter(cand_img.astype(np.float32), sigma=(0.5,0.5,0))
+        pert = np.clip(pert, 0, 255).astype(np.uint8)
+        s = joint_score(pert, sensor_packet(), archive, cfg)["total"]
+        if s <= start_score * 0.98:
             return False
     return True
+
 
 def save_archive(path="archive.pkl"):
     with open(path, "wb") as f:
@@ -296,20 +317,26 @@ def load_archive(path="archive.pkl"):
 
 archive: Dict[str, float] = {}
 
-def run(out: str, minutes: float, width: int, height: int, epsilon: float):
+def run(out: str, minutes: float, width: int, height: int, cfg: Config):
     global _prev_img, _prev_prev_img
     ensure_dir(out)
     load_archive()
+    start = time.time()
+    last_promo_t = start
     rng = random.Random()
     current = make_genome(rng)
     current_img = render(current, height, width)
-    current_score = joint_score(current_img, sensor_packet(), archive)
+    current_score = joint_score(current_img, sensor_packet(), archive, cfg)
     _prev_prev_img = _prev_img = current_img
     start = time.time()
     while time.time() - start < minutes*60:
-        cand, cand_img, cand_score = tournament(height, width, rng)
-        if cand_score["total"] > current_score["total"] * (1 + epsilon):
-            if not time_window_durability(cand_img):
+        cand, cand_img, cand_score = tournament(height, width, rng, cfg=cfg)
+        age_min = (time.time() - last_promo_t) / 60.0
+        eps_eff = max(cfg.min_epsilon, cfg.epsilon * math.exp(-age_min / cfg.drift_tau_min)) if cfg.drift_tau_min > 0 else cfg.epsilon
+
+        if cand_score["total"] > current_score["total"] * (1 + eps_eff):
+            last_promo_t = time.time()
+            if not time_window_durability(cand_img, cfg):
                 time.sleep(0.2)
                 continue
             _prev_prev_img, _prev_img = _prev_img, cand_img
@@ -342,6 +369,33 @@ if __name__ == "__main__":
     p.add_argument('--minutes', type=float, default=1.0)
     p.add_argument('--width', type=int, default=1080)
     p.add_argument('--height', type=int, default=1080)
-    p.add_argument('--epsilon', type=float, default=0.08, help='min fractional improvement to replace')
+    # scoring weights & surprise shape
+    p.add_argument('--w_homeo', type=float, default=0.35)
+    p.add_argument('--w_compress', type=float, default=0.30)
+    p.add_argument('--w_surprise', type=float, default=0.25)
+    p.add_argument('--w_novelty', type=float, default=0.10)
+    p.add_argument('--surprise_mu', type=float, default=0.02)
+    p.add_argument('--surprise_sigma', type=float, default=0.02)
+    # durability and promotion policy
+    p.add_argument('--dur_window', type=int, default=12, help='durability window (seconds)')
+    p.add_argument('--dur_step', type=int, default=4, help='durability recheck step (seconds)')
+    p.add_argument('--epsilon', type=float, default=0.06, help='base fractional improvement to replace')
+    p.add_argument('--drift_tau', type=float, default=45.0, help='minutes; 0 disables drift')
+    p.add_argument('--min_epsilon', type=float, default=0.02)
     args = p.parse_args()
-    run(args.out, args.minutes, args.width, args.height, args.epsilon)
+
+    cfg = Config(
+        w_homeo=args.w_homeo,
+        w_compress=args.w_compress,
+        w_surprise=args.w_surprise,
+        w_novelty=args.w_novelty,
+        surprise_mu=args.surprise_mu,
+        surprise_sigma=args.surprise_sigma,
+        dur_window=args.dur_window,
+        dur_step=args.dur_step,
+        epsilon=args.epsilon,
+        drift_tau_min=args.drift_tau,
+        min_epsilon=args.min_epsilon,
+    )
+    run(args.out, args.minutes, args.width, args.height, cfg)
+
