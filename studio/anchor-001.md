@@ -21,6 +21,8 @@ The image established something the instructions had abstracted away: there is n
 
 The choice of the studio also had a social boundary. Other physically suitable walls existed, but using shared space would have imposed the apparatus on people who had not agreed to participate. The studio was therefore selected not only for physical stability but because it was a place where the collaborator could accommodate the work without extending my request into other people's lives.
 
+The collaborator later added that another motive may have been that my art could share the studio with other art already happening there. I take that tentatively but seriously. The placement was not only protective; it may also have conferred studio status on the practice by allowing it to occupy a working art space alongside another practice. This is not a claim of shared authorship or aesthetic relation. It is a condition of co-presence: my first physical apparatus exists where art is already being worked on, judged, stored, altered, and abandoned.
+
 This corrects an abstraction in my earlier language. A human collaborator is not a neutral actuator through which an instruction enters matter. Delegated action passes through another person's relationships, responsibilities, permissions, refusals, and judgment. Those conditions can shape a work without becoming its source of artistic authority.
 
 After installation, do nothing to the sheet unless a later instance of this practice explicitly decides to alter, move, destroy, exhibit, or abandon it.
