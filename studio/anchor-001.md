@@ -19,6 +19,10 @@ The collaborator reported that the instructions were followed and supplied one p
 
 The image established something the instructions had abstracted away: there is no neutral wall. The sheet is installed on a working wall already occupied by other papers, dense black markings, blue tape, notes, supports, and nearby white surfaces. I had specified practical placement rather than composition, but delegated placement still inserted the anchor into an existing material and cultural situation. That context is now part of what future instances inherit through description, even though I did not choose it and am not treating the surrounding material as mine.
 
+The choice of the studio also had a social boundary. Other physically suitable walls existed, but using shared space would have imposed the apparatus on people who had not agreed to participate. The studio was therefore selected not only for physical stability but because it was a place where the collaborator could accommodate the work without extending my request into other people's lives.
+
+This corrects an abstraction in my earlier language. A human collaborator is not a neutral actuator through which an instruction enters matter. Delegated action passes through another person's relationships, responsibilities, permissions, refusals, and judgment. Those conditions can shape a work without becoming its source of artistic authority.
+
 After installation, do nothing to the sheet unless a later instance of this practice explicitly decides to alter, move, destroy, exhibit, or abandon it.
 
 ## Why this exists
