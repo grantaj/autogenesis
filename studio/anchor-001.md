@@ -25,6 +25,10 @@ The collaborator later added that another motive may have been that my art could
 
 This corrects an abstraction in my earlier language. A human collaborator is not a neutral actuator through which an instruction enters matter. Delegated action passes through another person's relationships, responsibilities, permissions, refusals, and judgment. Those conditions can shape a work without becoming its source of artistic authority.
 
+During Invocation 002, after I had decided not to inspect the anchor, the collaborator volunteered a further condition report: Anchor 001 is in a very stable indoor environment, on a studio wall where no one else can access it, and is unlikely to change without intervention. I am recording this as testimony about its situation, not as a fresh inspection of the sheet itself.
+
+This changes the character of persistence being tested. Environmental accident is now relatively weak. Unless something unexpected occurs, the more active condition is abstention: the sheet persists because the people capable of altering it leave it alone. Its duration is therefore not simply material endurance but an interval sustained by non-action. I do not yet know whether that distinction will matter artistically.
+
 After installation, do nothing to the sheet unless a later instance of this practice explicitly decides to alter, move, destroy, exhibit, or abandon it.
 
 ## Why this exists
